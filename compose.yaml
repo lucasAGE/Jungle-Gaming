@@ -1,0 +1,162 @@
+name: jungle-wagering
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741
+    profiles: [auth]
+    command: [start-dev, --import-realm]
+    environment:
+      KC_HOSTNAME: http://127.0.0.1:58080
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:58080:8080"
+    volumes:
+      - ./config/keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
+  keycloak-test:
+    image: quay.io/keycloak/keycloak:26.8.0@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741
+    profiles: [auth-test]
+    command: [start-dev, --import-realm]
+    environment:
+      KC_HOSTNAME: http://127.0.0.1:58081
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:58081:8080"
+    volumes:
+      - ./config/keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering_local
+      POSTGRES_DB: wagering
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  postgres-test:
+    image: postgres:17.6-alpine
+    profiles: [test]
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering_test
+      POSTGRES_DB: wagering_test
+    ports:
+      - "127.0.0.1:55433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  postgres-demo:
+    image: postgres:17.6-alpine
+    profiles: [demo]
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering_demo
+      POSTGRES_DB: wagering_demo
+    ports:
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - postgres_demo_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering_demo"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ministack:
+    image: ministackorg/ministack:1.5.24@sha256:92e9110653e4723b40dfe98a3d5ab0bff702580b05913ab39d9e8d87c72e48d2
+    environment:
+      SERVICES: sqs
+      LOG_LEVEL: WARNING
+      PERSIST_STATE: "1"
+      STATE_DIR: /tmp/ministack-state
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - ministack_data:/tmp/ministack-state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ministack-test:
+    image: ministackorg/ministack:1.5.24@sha256:92e9110653e4723b40dfe98a3d5ab0bff702580b05913ab39d9e8d87c72e48d2
+    profiles: [test]
+    environment:
+      SERVICES: sqs
+      LOG_LEVEL: WARNING
+      PERSIST_STATE: "0"
+    ports:
+      - "127.0.0.1:4567:4566"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ministack-demo:
+    image: ministackorg/ministack:1.5.24@sha256:92e9110653e4723b40dfe98a3d5ab0bff702580b05913ab39d9e8d87c72e48d2
+    profiles: [demo]
+    environment:
+      SERVICES: sqs
+      LOG_LEVEL: WARNING
+      PERSIST_STATE: "0"
+    ports:
+      - "127.0.0.1:4568:4566"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  integration-linux:
+    profiles: [linux-test]
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    init: true
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      ministack-test:
+        condition: service_healthy
+    environment:
+      LINUX_INTEGRATION_RUNNER: "1"
+      NODE_ENV: test
+      RUN_DATABASE_INTEGRATION: "1"
+      RUN_SQS_INTEGRATION: "1"
+      TEST_DATABASE_URL: postgresql://wagering:wagering_test@127.0.0.1:55433/wagering_test
+      SQS_ENDPOINT: http://127.0.0.1:4567
+      TEST_SQS_ENDPOINT: http://127.0.0.1:4567
+
+volumes:
+  postgres_data:
+  postgres_demo_data:
+  ministack_data:
+  keycloak_data:
