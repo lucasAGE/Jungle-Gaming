@@ -13,8 +13,6 @@
     "test:integration": "bun scripts/test-integration.ts",
     "test:integration:linux": "docker compose --profile test run --build --rm integration-linux",
     "test:auth": "bun scripts/test-auth.ts",
-    "test:demo": "bun scripts/test-demo.ts",
-    "demo": "bun run build && bun scripts/demo.ts",
     "auth:up": "docker compose --profile auth up -d --wait keycloak",
     "auth:token": "bun scripts/auth-token.ts",
     "obs:up": "docker compose -f compose.yaml -f compose.observability.yaml --profile observability up -d prometheus tempo grafana",

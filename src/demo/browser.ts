@@ -1,7 +1,6 @@
 /// <reference lib="dom" />
 import Keycloak from "keycloak-js";
-import { DemoControls } from "./controls.js";
-import { canReference, conflictRequest, decimalAmount, parallelPowerShellCommand, parallelWagerRequests, powerShellCommand, referenceFields, requireUuid, targetRequest, wagerRequest, type DemoKind, type DemoRequest, type DemoResponse, type DemoWager, type DemoWallet } from "./scenarios.js";
+import { canReference, conflictRequest, decimalAmount, powerShellCommand, referenceFields, requireUuid, wagerRequest, type DemoKind, type DemoRequest, type DemoResponse, type DemoWager, type DemoWallet } from "./scenarios.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -18,7 +17,6 @@ function notice(text: string, error = false): void {
 let auth: Keycloak | undefined;
 let wallet: DemoWallet | undefined;
 let lastWager: DemoRequest | undefined;
-let demoControls: DemoControls | undefined;
 let busy = false;
 const history: { body: DemoWager; status: string; transactionId?: string }[] = [];
 
@@ -30,7 +28,6 @@ function availability(): void {
   element<HTMLButtonElement>("conflict").disabled ||= !lastWager || (lastWager.body as DemoWager).kind === "LOSS";
   element<HTMLButtonElement>("new-player").disabled = busy;
   element<HTMLButtonElement>("new-external-id").disabled = busy;
-  demoControls?.availability(busy, auth?.authenticated === true);
 }
 
 async function run(action: () => Promise<unknown>): Promise<void> {
@@ -69,7 +66,7 @@ async function refreshWallet(accessToken: string): Promise<void> {
   if (!wallet) return;
   try {
     const response = await fetch(`/wallets/${wallet.id}`, {
-      headers: { Authorization: `Bearer ${accessToken}`, ...processHeader() }, signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) throw new Error("Refresh failed");
     selectWallet(await response.json() as DemoWallet);
@@ -78,19 +75,11 @@ async function refreshWallet(accessToken: string): Promise<void> {
   }
 }
 
-function processHeader(): Record<string, string> {
-  const target = demoControls ? value("request-target") : "";
-  return target ? { "X-Demo-Process": target } : {};
-}
-
-async function execute(input: DemoRequest, record?: DemoWager): Promise<DemoResponse> {
-  const processId = demoControls && !input.path.startsWith("/demo/") ? Number(value("request-target")) : 0;
-  const request = targetRequest(input, processId ? processId as 1 | 2 | 3 : undefined);
-  const routing = request.processId ? { "X-Demo-Process": String(request.processId) } : {};
+async function execute(request: DemoRequest, record?: DemoWager): Promise<DemoResponse> {
   put("command", powerShellCommand(location.origin, request));
   const correlationId = crypto.randomUUID();
   put("request", JSON.stringify({ method: request.method, url: `${location.origin}${request.path}`,
-    headers: { Authorization: "Bearer [redacted]", "X-Correlation-Id": correlationId, ...routing,
+    headers: { Authorization: "Bearer [redacted]", "X-Correlation-Id": correlationId,
       ...(request.idempotencyKey ? { "Idempotency-Key": request.idempotencyKey } : {}),
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(request.body === undefined ? {} : { body: request.body }) }, null, 2));
@@ -112,11 +101,11 @@ async function execute(input: DemoRequest, record?: DemoWager): Promise<DemoResp
   try {
     response = await fetch(request.path, {
       method: request.method,
-      headers: { Authorization: `Bearer ${accessToken}`, "X-Correlation-Id": correlationId, ...routing,
+      headers: { Authorization: `Bearer ${accessToken}`, "X-Correlation-Id": correlationId,
         ...(request.idempotencyKey ? { "Idempotency-Key": request.idempotencyKey } : {}),
         ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-      signal: AbortSignal.timeout(request.path === "/demo/control/reset" ? 180_000 : request.path === "/demo/control/process" ? 45_000 : 15_000),
+      signal: AbortSignal.timeout(15_000),
     });
     text = await response.text();
   } catch {
@@ -126,9 +115,7 @@ async function execute(input: DemoRequest, record?: DemoWager): Promise<DemoResp
       ? "The server may have committed the operation. Replay the same wager request to resolve its result; do not submit a new identity."
       : request.path === "/wallets"
         ? "The wallet may have been created. Retry with this same player ID; an existing wallet returns a duplicate-creation conflict."
-        : request.path.startsWith("/demo/control/")
-          ? "Refresh the demo state before deciding whether to repeat the action. For SQS, replay the saved envelope to retain its identity."
-          : "Retry the same read or reconciliation request.";
+        : "Retry the same read or reconciliation request.";
     put("response", `The connection failed or timed out. ${recovery}`);
     throw new Error(`No complete HTTP response received. ${recovery}`);
   }
@@ -175,72 +162,6 @@ async function execute(input: DemoRequest, record?: DemoWager): Promise<DemoResp
 }
 
 function kind(): DemoKind { return value("kind") as DemoKind; }
-
-async function parallel(count: number, distinct: boolean): Promise<void> {
-  const target = Number(value("request-target")) as 0 | 1 | 2 | 3;
-  const requests = parallelWagerRequests(currentWager(), count, distinct).map((request) => target ? { ...request, processId: target } : request);
-  put("command", parallelPowerShellCommand(location.origin, requests));
-  put("request", JSON.stringify({ dispatch: "parallel", requests, authorization: "Bearer [redacted]" }, null, 2));
-  put("response", "// Parallel HTTP requests in progress…");
-  put("http-status", `SENDING ${count} REQUESTS`);
-  put("latency", "— ms");
-  put("correlation", "Each response below contains its correlation ID.");
-  let accessToken: string;
-  try { accessToken = await token(); }
-  catch (error) {
-    put("http-status", "REQUESTS NOT SENT");
-    put("response", "Authentication failed before parallel dispatch. Sign in again.");
-    throw error;
-  }
-  const started = performance.now();
-  // Save every identity before dispatch so a missing response never implies a safe new transaction.
-  for (const request of requests) {
-    const body = request.body as DemoWager;
-    if (!history.some((item) => item.body.externalTransactionId === body.externalTransactionId)) {
-      history.unshift({ body: structuredClone(body), status: "UNKNOWN" });
-    }
-  }
-  lastWager = requests[requests.length - 1];
-  const results = await Promise.all(requests.map(async (request) => {
-    const body = request.body as DemoWager;
-    const correlationId = crypto.randomUUID();
-    try {
-      const response = await fetch(request.path, {
-        method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json",
-          "Idempotency-Key": request.idempotencyKey!, "X-Correlation-Id": correlationId,
-          ...(request.processId ? { "X-Demo-Process": String(request.processId) } : {}) },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(15_000),
-      });
-      const text = await response.text();
-      let result: Record<string, unknown>;
-      try { result = JSON.parse(text) as Record<string, unknown>; } catch { result = { response: text }; }
-      return { externalTransactionId: body.externalTransactionId, correlationId, httpStatus: response.status, result };
-    } catch {
-      return { externalTransactionId: body.externalTransactionId, correlationId, httpStatus: null,
-        result: { status: "UNKNOWN", message: "No complete response. Read or replay this same identity; it may already be committed." } as Record<string, unknown> };
-    }
-  }));
-  for (const result of results) {
-    const item = history.find((entry) => entry.body.externalTransactionId === result.externalTransactionId)!;
-    const status = result.httpStatus === null || result.httpStatus >= 500 ? "UNKNOWN"
-      : typeof result.result.status === "string" ? result.result.status : `HTTP ${result.httpStatus}`;
-    if (result.httpStatus !== 409 && (status !== "UNKNOWN" || item.status === "UNKNOWN")) item.status = status;
-    if (typeof result.result.transactionId === "string") item.transactionId = result.result.transactionId;
-  }
-  const counts = { successful: results.filter((result) => result.httpStatus !== null && result.httpStatus >= 200 && result.httpStatus < 300).length,
-    rejected: results.filter((result) => result.httpStatus !== null && result.httpStatus >= 400 && result.httpStatus < 500).length,
-    unknown: results.filter((result) => result.httpStatus === null || result.httpStatus >= 500).length };
-  put("response", JSON.stringify({ requests: count, identities: distinct ? "distinct" : "same", counts, results }, null, 2));
-  put("http-status", `${counts.successful} SUCCESS · ${counts.rejected} ERRORS · ${counts.unknown} UNKNOWN`);
-  element("http-status").className = counts.rejected || counts.unknown ? "error" : "success";
-  put("latency", `${Math.round(performance.now() - started)} ms`);
-  put("reconciled", "Check again");
-  put("reconciliation-note", "Reconcile after your operations to verify the ledger.");
-  if (counts.unknown === 0) freshExternalId();
-  renderHistory();
-  await refreshWallet(accessToken);
-  notice(`${count} HTTP requests dispatched in parallel. Inspect individual outcomes and reconcile the wallet.`, counts.unknown > 0);
-}
 
 function renderReferences(): void {
   const select = element<HTMLSelectElement>("reference-history");
@@ -376,7 +297,7 @@ element<HTMLSelectElement>("reference-history").disabled = true;
 try {
   const response = await fetch("/demo/config");
   if (!response.ok) throw new Error("Presentation configuration is unavailable.");
-  const config = await response.json() as { issuer: string; clientId: string; controlsEnabled?: boolean };
+  const config = await response.json() as { issuer: string; clientId: string };
   auth = new Keycloak({ oidcProvider: config.issuer, clientId: config.clientId });
   await auth.init({ pkceMethod: "S256", checkLoginIframe: false, responseMode: "query", redirectUri: `${location.origin}/demo` });
   put("session-label", auth.authenticated ? `Signed in · ${auth.tokenParsed?.preferred_username ?? "presenter"}` : "Authentication required");
@@ -387,31 +308,6 @@ try {
     else await auth?.login({ redirectUri: `${location.origin}/demo` });
   }); });
   if (auth.authenticated) notice("Ready. Create a wallet to begin, or paste an existing wallet ID and read it.");
-  if (config.controlsEnabled) {
-    put("dashboard-link", "Development Grafana · API :3000");
-    demoControls = new DemoControls({ run, execute, token, wager: currentWager, selectWallet, parallel,
-      rememberWager(body) {
-        lastWager = wagerRequest(body);
-        if (!history.some((item) => item.body.externalTransactionId === body.externalTransactionId)) {
-          history.unshift({ body: structuredClone(body), status: "QUEUED" });
-        }
-        freshExternalId();
-        renderHistory();
-        put("balance-note", "SQS processing is asynchronous. Read the wallet to refresh its balance.");
-      },
-      resetSession() {
-        history.splice(0);
-        element<HTMLFormElement>("wallet-form").reset();
-        element<HTMLFormElement>("wager-form").reset();
-        element("kind").dispatchEvent(new Event("change"));
-        newPlayer();
-        renderHistory();
-        element<HTMLInputElement>("reference").value = "";
-        element<HTMLSelectElement>("request-target").value = "";
-      },
-    });
-    if (auth.authenticated) await run(() => demoControls!.refresh());
-  }
 } catch {
   put("session-label", "Identity provider unavailable");
   notice("Authentication could not initialize. Start Keycloak with bun run auth:up, then reload this page.", true);

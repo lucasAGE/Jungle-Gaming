@@ -71,23 +71,6 @@ services:
       timeout: 3s
       retries: 20
 
-  postgres-demo:
-    image: postgres:17.6-alpine
-    profiles: [demo]
-    environment:
-      POSTGRES_USER: wagering
-      POSTGRES_PASSWORD: wagering_demo
-      POSTGRES_DB: wagering_demo
-    ports:
-      - "127.0.0.1:55434:5432"
-    volumes:
-      - postgres_demo_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering_demo"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-
   ministack:
     image: ministackorg/ministack:1.5.24@sha256:92e9110653e4723b40dfe98a3d5ab0bff702580b05913ab39d9e8d87c72e48d2
     environment:
@@ -120,21 +103,6 @@ services:
       timeout: 3s
       retries: 20
 
-  ministack-demo:
-    image: ministackorg/ministack:1.5.24@sha256:92e9110653e4723b40dfe98a3d5ab0bff702580b05913ab39d9e8d87c72e48d2
-    profiles: [demo]
-    environment:
-      SERVICES: sqs
-      LOG_LEVEL: WARNING
-      PERSIST_STATE: "0"
-    ports:
-      - "127.0.0.1:4568:4566"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-
   integration-linux:
     profiles: [linux-test]
     build:
@@ -157,6 +125,5 @@ services:
 
 volumes:
   postgres_data:
-  postgres_demo_data:
   ministack_data:
   keycloak_data:

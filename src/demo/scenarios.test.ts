@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { canReference, conflictRequest, decimalAmount, parallelPowerShellCommand, parallelWagerRequests, powerShellCommand, referenceFields, requireUuid, sqsSubmission, targetRequest, wagerRequest, type DemoWager } from "./scenarios.js";
+import { canReference, conflictRequest, decimalAmount, powerShellCommand, referenceFields, requireUuid, wagerRequest, type DemoWager } from "./scenarios.js";
 import { wagerInput } from "../application/wager-input.js";
-import { sqsWagerInput } from "../application/sqs-wager-input.js";
 
 const body: DemoWager = {
   providerId: "provider-a", externalTransactionId: "external-1",
@@ -54,77 +53,6 @@ describe("presentation requests", () => {
     expect(canReference("ROLLBACK", "ROLLBACK")).toBe(false);
     expect(requireUuid(body.walletId)).toBe(body.walletId);
     expect(() => requireUuid("../../metrics")).toThrow();
-  });
-
-  test("SQS preserves the HTTP business identity and captures an independent payload for envelope retries", () => {
-    const editable = structuredClone(body) as { money: { amount: string; currency: "BRL" } } & DemoWager;
-    const messageId = "0192f291-27dd-7d3f-8071-5f8685deef37";
-    const original = sqsSubmission(editable, messageId, 50);
-    editable.money.amount = "80.00";
-    expect(original.messageId).toBe(messageId);
-    expect(original.copies).toBe(50);
-    expect(original.data.money.amount).toBe("25.00");
-    expect(original.data.idempotencyKey).toBe(wagerRequest(body).idempotencyKey!);
-    const anotherEnvelope = sqsSubmission(body, crypto.randomUUID(), 1);
-    expect(anotherEnvelope.messageId).not.toBe(original.messageId);
-    expect(anotherEnvelope.data).toEqual(original.data);
-    const received = sqsWagerInput(JSON.stringify({ messageId, type: "WagerTransactionRequested", occurredAt: new Date().toISOString(),
-      data: original.data }), body.walletId);
-    expect(wagerInput(received.body).externalTransactionId).toBe(body.externalTransactionId);
-    for (const copies of [0, 51, 1.5, NaN, Infinity]) expect(() => sqsSubmission(body, messageId, copies)).toThrow("between 1 and 50");
-    expect(() => sqsSubmission(body, "not-a-uuid", 1)).toThrow();
-  });
-
-  test("PowerShell can target an independent process and supplies the supervisor origin for control writes", () => {
-    const financial = powerShellCommand("http://127.0.0.1:3100", { ...wagerRequest(body), processId: 3 });
-    expect(financial).toContain("'X-Demo-Process' = '3'");
-    expect(financial).not.toContain("  Origin =");
-    const control = powerShellCommand("http://127.0.0.1:3100", {
-      method: "POST", path: "/demo/control/reset", body: { confirmation: "RESET DEMO" },
-    });
-    expect(control).toContain("Origin = 'http://127.0.0.1:3100'");
-    expect(control).not.toContain("X-Demo-Process");
-    expect(control).toContain('"confirmation": "RESET DEMO"');
-    const read = powerShellCommand("http://127.0.0.1:3100", { method: "GET", path: "/demo/control/state" });
-    expect(read).not.toContain("  Origin =");
-  });
-
-  test("parallel dispatch snapshots copies with shared or distinct persistent identities", () => {
-    const same = parallelWagerRequests(body, 50, false);
-    expect(same).toHaveLength(50);
-    expect(new Set(same.map((request) => request.idempotencyKey)).size).toBe(1);
-    expect(same[0]!.body).not.toBe(same[1]!.body);
-    const distinct = parallelWagerRequests(body, 2, true);
-    expect(new Set(distinct.map((request) => request.idempotencyKey)).size).toBe(2);
-    for (const request of distinct) {
-      const parsed = wagerInput(request.body);
-      expect(parsed.externalTransactionId).not.toBe(body.externalTransactionId);
-      expect(parsed.walletId).toBe(body.walletId);
-      expect(parsed.money.toString()).toBe("25.00");
-    }
-    for (const count of [1, 51, 1.5, NaN]) expect(() => parallelWagerRequests(body, count, false)).toThrow("between 2 and 50");
-  });
-
-  test("parallel PowerShell jobs retain payloads and safely quote shell metacharacters", () => {
-    const requests = parallelWagerRequests({ ...body, gameId: "game'$(Get-Secret)`value" }, 2, true);
-    const command = parallelPowerShellCommand("http://127.0.0.1:3100", requests);
-    expect(command).toContain("game''$(Get-Secret)`value");
-    expect(command).toContain("Start-Job -ArgumentList $baseUrl, $accessToken");
-    expect(command).toContain("Wait-Job | Receive-Job");
-    expect(command).toContain("$headers['X-Demo-Process']");
-    for (const request of requests) expect(command).toContain(request.idempotencyKey!);
-  });
-
-  test("a replay can leave a crashed process without changing its persistent identity or payload", () => {
-    const original = { ...wagerRequest(body), processId: 1 as const };
-    const automatic = targetRequest(original);
-    const anotherProcess = targetRequest(original, 3);
-    expect(automatic).not.toHaveProperty("processId");
-    expect(anotherProcess.processId).toBe(3);
-    expect(automatic.idempotencyKey).toBe(original.idempotencyKey!);
-    expect(automatic.body).toEqual(original.body);
-    expect(anotherProcess.body).toEqual(original.body);
-    expect(original.processId).toBe(1);
   });
 
   test("switching to LOSS drops a previously selected reference and still satisfies the API contract", () => {

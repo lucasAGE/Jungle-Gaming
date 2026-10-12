@@ -335,115 +335,13 @@ input:focus,select:focus{
   width:100%;
   margin-top:17px
 }
-.demo-controls{
-  margin-bottom:24px
+.operation-details{
+  margin-top:16px
 }
-.demo-controls>summary{
-  display:flex;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:10px;
+.operation-details>summary{
   cursor:pointer;
-  font-size:14px
-}
-.demo-controls>summary::before{
-  content:"+";
-  font-size:19px;
-  color:var(--teal)
-}
-.demo-controls[open]>summary::before{
-  content:"−"
-}
-.state-badge{
-  background:#edf3f1;
-  border-radius:4px;
-  padding:4px 7px;
-  font:10px Consolas,monospace;
-  color:var(--teal)
-}
-.process-grid{
-  display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
-  gap:12px;
-  margin-top:18px
-}
-.process-card,.demo-section{
-  border:1px solid var(--line);
-  border-radius:7px;
-  padding:16px;
-  min-width:0
-}
-.process-status{
-  min-height:16px;
-  overflow-wrap:anywhere;
-  color:var(--muted)
-}
-.worker-flags{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:9px
-}
-.worker-flags label{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  margin:0;
-  font-weight:400
-}
-.worker-flags input{
-  width:14px;
-  height:14px;
-  padding:0;
-  accent-color:var(--teal)
-}
-.demo-grid{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:12px;
-  margin:18px 0
-}
-.dependency-row{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  margin-top:14px;
+  color:var(--teal);
   font-size:12px
-}
-.dependency-row small{
-  display:block;
-  color:var(--muted);
-  margin-top:3px
-}
-.danger{
-  background:#fff4ef;
-  color:#973e2c;
-  border-color:#e9c9bf
-}
-.danger:hover{
-  background:#fce4db
-}
-.reset-section{
-  background:#fffcfa;
-  border-color:#e9d8cf
-}
-.process-output{
-  background:#f5f8f7;
-  border-radius:6px;
-  font-size:11px
-}
-.process-output summary{
-  cursor:pointer;
-  padding:13px 16px
-}
-.process-output pre{
-  max-height:260px;
-  overflow:auto;
-  font-size:10px;
-  padding-top:0
-}
-#sqs-last-identity,#queue-counts{
-  overflow-wrap:anywhere
 }
 .replay-panel{
   border-top:1px solid var(--line);
@@ -633,9 +531,6 @@ footer{
   color:#80918f
 }
 @media(max-width:1000px){
-  .worker-flags{
-    grid-template-columns:1fr
-  }
   .workspace{
     grid-template-columns:minmax(320px,.9fr) minmax(340px,1fr);
     gap:15px
@@ -660,12 +555,6 @@ footer{
   }
 }
 @media(max-width:760px){
-  .process-grid,.demo-grid{
-    grid-template-columns:1fr
-  }
-  .worker-flags{
-    grid-template-columns:1fr 1fr
-  }
   .workspace{
     grid-template-columns:1fr
   }
