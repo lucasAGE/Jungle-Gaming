@@ -6,25 +6,18 @@ The original [README](README.md) remains unchanged and is the acceptance contrac
 This document records decisions and limitations, not replacements for its requirements.
 See [SETUP.md](SETUP.md) for commands and measured validation results.
 
-Increment 1 introduced the project setup and immutable Money value object.
-Increment 2 introduced wallet opening and wallet/ledger reads through HTTP, backed
-by PostgreSQL. Increment 3 added idempotent HTTP BET and transaction reads.
-Increment 4 publishes the transactional outbox to MiniStack SQS. Increment 5 consumes
-BET requests from SQS through the same financial workflow as HTTP, with a transactional
-inbox, bounded input retries and a DLQ. Increment 6 adds unreferenced WIN credits and
-zero-amount LOSS results to that shared workflow. Increment 7 adds referenced WIN and
-durable pending-reference recovery. Increment 8 adds full BET refunds, including
-duplicate-reversal protection and recovery when the REFUND arrives before its BET.
-Increment 9 adds full ROLLBACK reversals of processed BET, WIN and REFUND transactions.
-Increments 10–12 add durable FAILED decisions, read-only reconciliation,
-correlated operational telemetry, health checks and real network recovery tests.
+The processor is one modular NestJS application. HTTP and SQS use the same financial
+workflow, with PostgreSQL enforcing persistent identities, per-wallet serialization
+and atomic financial records. Background workers publish outbox events and resolve
+pending references. The browser interface supports manual financial demonstrations;
+integration tests exercise concurrency and recovery with independent processes.
 
 | Requirement group | Current status |
 | --- | --- |
 | Bun 1.x, strict TypeScript, NestJS | Implemented; dependencies and runtime pinned |
 | Money, Wallet opening/debit/credit invariants, immutable ledger | Implemented and unit tested |
 | PostgreSQL, MikroORM, Docker Compose | Implemented; development and isolated test services |
-| Versioned, reversible migrations and database constraints | Original financial history through migration 008; migration 202610120001 adds balanced accounting and a lossless downgrade |
+| Versioned, reversible migrations and database constraints | Nine versioned migrations, with guarded downgrades that protect accepted financial records |
 | POST wallet, GET wallet, cursor-based ledger reads | Implemented |
 | Atomic wallet, transaction, ledger and outbox | Implemented for positive openings, BET, WIN, REFUND and ROLLBACK; LOSS/rejections persist their transaction and one event without a ledger entry |
 | Persistent duplicate protection across application processes | Implemented for opening, BET, WIN, LOSS, REFUND and ROLLBACK |
@@ -39,20 +32,18 @@ correlated operational telemetry, health checks and real network recovery tests.
 | Three-process financial concurrency/recovery tests | Opening, BET/WIN/LOSS/REFUND/ROLLBACK, concurrent publishers and SQS input tested; native SIGTERM verified in Linux; measured results and platform limits are recorded in SETUP.md |
 
 Authentication implementation, double-entry bookkeeping, OpenTelemetry, dashboards
-and load testing are optional in the README. After the mandatory increments, the
-candidate requested external authentication, tracing, a local dashboard, a load
-experiment and an interactive presentation UI. The candidate then explicitly approved
-double-entry bookkeeping, using one account per wallet and shared counterparty
-accounts per currency. These additions are described below; they preserve the original
-financial behavior. Custom authentication, Redis, Kubernetes and event sourcing remain excluded.
+and load testing are optional in the README and implemented here. Double-entry
+bookkeeping uses one account per wallet and shared counterparty accounts per currency.
+The presentation UI is an additional convenience. Custom authentication, Redis,
+Kubernetes and event sourcing are outside the scope.
 
 ## Optional double-entry bookkeeping
 
-Each financial movement now creates an immutable `AccountingTransfer` in the same
+Each financial movement creates an immutable `AccountingTransfer` in the same
 transaction as the wallet, wager, wallet ledger, inbox completion (for SQS), and outbox.
-HTTP, SQS and pending-reference recovery retain the same application workflow.
-Publishing and acknowledgment still happen only after their existing commit boundaries.
-There are no new event types or changed replay responses.
+HTTP, SQS and pending-reference recovery share that application workflow.
+Publishing follows the financial commit; SQS acknowledgment follows the committed
+input decision. Accounting transfers are internal records, without a separate event type.
 
 | Account | Meaning | Scope |
 | --- | --- | --- |
@@ -62,7 +53,7 @@ There are no new event types or changed replay responses.
 
 The house account is not another player wallet. It has no mutable balance row,
 spending limit or per-operation update. Journal inserts reference it without taking
-a shared exclusive lock, so independent wallets still process concurrently. Its net
+a shared exclusive lock, so independent wallets process concurrently. Its net
 position may be negative after winnings; it represents settlement, not cash,
 liquidity or audited profit. A real deposit/withdrawal and treasury model is outside
 this challenge. Separate house accounts per player would add no required behavior;
@@ -87,26 +78,17 @@ direction to match the immutable wallet ledger. Foreign keys bind account curren
 Reciprocal, initially deferred foreign keys require an account for every wallet and
 a journal transfer for every ledger entry **at commit**. The journal's primary key
 prevents duplicate pairs. Statement triggers forbid UPDATE, DELETE and TRUNCATE of
-accounts and journal rows. Existing wallet non-negative and ledger arithmetic guards
-remain in force. Database administrators can still disable guards; this is not a
+accounts and journal rows. Wallet non-negative and ledger arithmetic guards apply
+independently. Database administrators can disable guards; this is not a
 tamper-proof storage system.
 
 `GET /wallets/:walletId/journal` is operator-only and uses the ledger's limit (1–100),
 ordering and wallet-bound opaque cursor. Each item exposes a decimal-string `money`,
 `debitAccountId`, `creditAccountId`, ledger/transaction IDs and original timestamp.
-The shared amount applies to both legs. Existing wallet reconciliation retains its
-documented stored-balance versus ledger comparison. Integration audits additionally
-check that wallet accounting credits minus debits equal both balances, and that
-global debits equal credits per currency. No automatic balance repair is introduced.
-
-Migration `Migration202610120001` is the ninth migration. It leaves migrations
-001–008 unchanged and backfills every existing wallet and movement while preserving
-their original IDs, amounts and timestamps. Its downgrade locks the source and
-accounting tables and compares both directions of the deterministic reconstruction.
-It refuses differences; otherwise it removes only the reconstructible accounting
-extension. Reapplying restores exactly the same accounting rows without changing
-financial, inbox or outbox history. Stop all old application instances before upgrading:
-their writes cannot satisfy the new deferred constraints. Database reset is unnecessary.
+The shared amount applies to both legs. Wallet reconciliation compares stored balance
+with the ledger. Integration audits also check that wallet accounting credits minus
+debits equal both balances, and that
+global debits equal credits per currency. Reconciliation never repairs balances automatically.
 
 ## Money and exact persistence
 
@@ -167,7 +149,7 @@ flush does not commit the surrounding transaction. Any failure rolls everything 
 including a failure on the last outbox insert. The HTTP success response follows commit.
 Each operation uses a fresh EntityManager; the global identity map is not used.
 
-Source code remains under `src/`, grouped by responsibility: `domain/`,
+Source code lives under `src/`, grouped by responsibility: `domain/`,
 `application/`, `http/` and `infrastructure/database/`. Nest modules wire these
 objects together. Unit tests live beside the code they exercise (`*.test.ts`);
 real database/process tests and their shared startup helper live under
@@ -182,19 +164,53 @@ The start command compiles TypeScript and runs emitted JavaScript with Bun, pres
 NestJS decorator metadata. ORM connections close through NestJS shutdown hooks.
 There is no automatic schema synchronization or migration on application startup.
 
+## Versioned migrations
+
+The schema is defined by nine versioned, transactional migrations. `db:migrate`
+applies pending migrations in order; `db:rollback` reverses the latest applied one.
+An empty database requires the complete sequence. Applied versions are recorded in
+PostgreSQL, so repeating `db:migrate` does not recreate the schema or financial data.
+Schema changes require new reversible migration files rather than edits to applied versions.
+
+A reversible schema operation must also protect accepted records. Downgrades acquire
+exclusive locks and refuse to remove data that the target schema cannot represent:
+
+| Migration | Schema responsibility | Downgrade behavior |
+| --- | --- | --- |
+| `Migration202610100001` | Wallets, opening transactions, immutable ledger and outbox | Drops the base schema and its data; destructive rollback is tested only in the isolated disposable database |
+| `Migration202610100002` | BET metadata, results and terminal transaction protection | Refuses BET records; an opening-only database can round-trip without losing openings |
+| `Migration202610100003` | Persistent inbox | Refuses any inbox records, preserving durable duplicate protection |
+| `Migration202610100004` | WIN and LOSS constraints | Refuses WIN/LOSS records; preserves opening, BET and inbox data |
+| `Migration202610100005` | References and scheduled resolution | Refuses reference records; preserves unreferenced transactions and inbox data |
+| `Migration202610100006` | Full REFUND constraints and reversal uniqueness | Refuses REFUND records, including pending and rejected decisions |
+| `Migration202610100007` | Full ROLLBACK constraints and reversal uniqueness | Refuses ROLLBACK records, including pending and rejected decisions |
+| `Migration202610100008` | Durable FAILED decisions | Refuses FAILED records, preserving failure audit data |
+| `Migration202610120001` | Accounts, balanced journal and accounting view | Allows removal only when accounting rows exactly match their deterministic reconstruction from the financial ledger |
+
+The accounting migration backfills wallet accounts and transfers while preserving
+source IDs, amounts and timestamps. Its downgrade locks source and accounting tables
+and compares reconstruction in both directions. Reapplying it restores the same
+accounting rows without changing financial, inbox or outbox records. Stop application
+instances during schema changes; an application without accounting writes cannot
+satisfy the journal's deferred constraints.
+
+When a downgrade guard refuses, use a forward migration that preserves the records.
+Resetting the disposable test database is an explicit guarded test operation;
+normal application startup never resets development data.
+
 ## Opening decisions and database guarantees
 
 | Question | Decision and behavior |
 | --- | --- |
 | Initial balance greater than zero | Create version `1`, one internal `OPENING` transaction, one `CREDIT` from zero, and two pending outbox events in the same transaction. |
 | Initial balance zero | Create version `1` without an opening transaction, ledger entry or event: no balance change occurred. |
-| Internal transaction fields | `OpeningTransaction` represents an already-applied internal opening. It has no fabricated provider, game or round. Its original result balance equals its opening amount; the read adapter supports existing records without a new result column value. |
+| Internal transaction fields | `OpeningTransaction` represents an already-applied internal opening. It has no fabricated provider, game or round. Its result balance equals its opening amount. |
 | Duplicate creation | The unique `(player_id, currency)` constraint returns HTTP 409, whether the repeated amount matches or differs. The opening key `opening:{walletId}` and one-opening-per-wallet uniqueness persist in PostgreSQL. |
 | Idempotency header on wallet creation | The README defines header-based replay for wagering, not wallet creation. `POST /wallets` does not promise replay or accept a special opening idempotency contract; repeat requests conflict without duplicating credit. |
 | Concurrent opening | A unique index arbitrates competing inserts across processes. There is no existing wallet row to lock, so `SELECT FOR UPDATE` is unnecessary here. BET takes a pessimistic row lock per wallet. |
 | Required events for opening | Persist `WagerTransactionProcessed` and `WalletBalanceChanged`, each as a concrete subclass of the abstract event envelope. They share a correlation ID and use the opening transaction as causation ID. |
 
-The migration enforces non-negative finite wallet balances, positive versions,
+The database enforces non-negative finite wallet balances, positive versions,
 positive financial amounts, BRL, unique player/currency and opening/idempotency
 identities. Numeric upper bounds reject PostgreSQL `NaN` as well as out-of-range
 values. Composite foreign keys bind transaction player/currency to the wallet and
@@ -208,12 +224,10 @@ matching event identity, aggregate and type. The event ID has database uniquenes
 These constraints complement the application transaction; they do not recompute the
 entire ledger or prevent a database administrator from disabling protections.
 The local Compose account also runs migrations. Separate restricted runtime and
-migration database roles are a future deployment hardening step.
+migration database roles are outside this local setup.
 
-`Migration202610100001` is versioned, transactional and reversible. Its down migration
-drops the opening schema and its data, including trigger functions. Down is tested
-only on the isolated disposable test database. Future changes must add new reversible
-migrations; no destructive startup reset is used for development.
+Migration execution and downgrade safeguards are described under
+[Versioned migrations](#versioned-migrations). Application startup never resets data.
 
 ## Wager idempotency and concurrency decisions
 
@@ -258,34 +272,24 @@ the external-ID lookup; the latter can represent the same key and must be replay
 Payload hashing uses SHA-256 over UTF-8 JSON with keys sorted lexicographically at
 every object level. The exact subset is `providerId`, `externalTransactionId`,
 `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money` (amount and currency), and
-`referenceExternalTransactionId` when supplied. Omitting the reference preserves
-the existing hashes for unreferenced operations.
+`referenceExternalTransactionId` when supplied. An omitted reference is excluded
+from the canonical object.
 Hashing follows validation/UUID normalization; amounts remain canonical decimal
 strings. The header, correlation IDs and other transport metadata are excluded.
 Unknown fields are rejected, rather than silently excluded. Tests include a fixed
 canonical JSON/hash fixture and differently ordered nested keys.
 
-`Migration202610100002` extends the schema without editing migration 001. BET metadata,
-result balance and final status/failure/timestamp combinations have database checks.
+Wager metadata, result balance and final status/failure/timestamp combinations have database checks.
 The ledger FK includes transaction status so rejected transactions cannot receive
 entries. A trigger binds direction to kind, and triggers reject terminal transaction
-updates, deletes and truncation. One-opening-per-wallet becomes a partial unique index.
-
-Migration 002's `down()` takes an exclusive lock and refuses to proceed if BET history
-exists: the older schema cannot represent those records. Before accepting BETs, down/up
-is reversible and preserves all openings. After accepting BETs, keeping financial
-history requires retaining this schema and using a forward migration. This restriction
-is deliberate; unconditional downgrade with BET data is not supported. Tests verify
-both the opening-only round trip and refusal without data changes. The disposable test
-database is reset explicitly by a guarded test helper, never by application startup.
+updates, deletes and truncation. A partial unique index allows one opening per wallet.
 
 ## WIN and LOSS decisions
 
-Both operations reuse the existing transaction, wallet lock, idempotency and inbox
+Both operations use the shared transaction, wallet lock, idempotency and inbox
 workflow. Identity uniqueness spans all external kinds: changing BET to WIN under
 the same key is a payload conflict, and changing only its key does not bypass the
-provider/external-ID constraint. Existing BET payload hashes and event envelopes
-remain unchanged. There is no new endpoint or separate credit processor.
+provider/external-ID constraint. All wager kinds use the same endpoint and processor.
 
 | Ambiguity | Decision and behavior |
 | --- | --- |
@@ -298,17 +302,15 @@ remain unchanged. There is no new endpoint or separate credit processor.
 | LOSS concurrency | Take the same wallet row lock even without a balance update, so its stored original balance describes a serialized point relative to concurrent credits/debits. |
 
 `WagerTransaction.kind` is explicit. Event factories use `wager` for BET/WIN/LOSS/REFUND/ROLLBACK
-and retain `opening` for the internal opening. A processed status no longer implies
+and `opening` for the internal opening. A processed status does not imply
 that a ledger entry exists: LOSS is successful with no movement. Domain guards bind
 each event to the matching transaction, wallet, direction and amount.
 
-`Migration202610100004` extends the kind, amount, status, metadata and rejection-code
-checks; provider/external uniqueness now includes all three external kinds. LOSS must
-be zero and processed; a trigger rejects any LOSS ledger entry or incorrect WIN/BET
+Database checks cover kind, amount, status, metadata and rejection codes;
+provider/external uniqueness spans all external kinds. LOSS must
+be zero; a trigger rejects any LOSS ledger entry or incorrect WIN/BET
 direction. Positive ledger amounts, exact numeric storage, status-aware foreign keys
-and terminal immutability remain in force. Its down migration locks transactions and
-refuses any WIN/LOSS history; otherwise it restores the previous schema while preserving
-OPENING, BET and inbox records. No earlier migration was edited.
+and terminal immutability protect all financial movements.
 
 ## WIN references and durable pending work
 
@@ -353,8 +355,8 @@ its locks so another application process can claim it after restart.
 250 ms. It is enabled by default (`REFERENCE_WORKER_ENABLED=true`); `false` disables
 polling. It logs completed checks only after commit, with transaction, wallet,
 provider and the original correlation ID, without monetary payloads. Shutdown
-awaits active work before the database connection is closed. The existing native
-Windows SIGTERM limitation still applies; graceful Nest closure is tested separately.
+awaits active work before the database connection is closed. Native SIGTERM is
+verified in Linux; graceful Nest closure is also tested independently of the signal.
 
 Only the initial acceptance emits WagerTransactionPendingReference. A missing-check
 reschedule emits no event. Successful resolution emits WagerTransactionProcessed
@@ -363,17 +365,13 @@ WagerTransactionRejected. The initial correlation ID is retained across restarts
 Output delivery order is not guaranteed; consumers must use transaction/event
 identity and deduplicate events rather than assume broker ordering.
 
-`Migration202610100005` adds the external/resolved reference, attempt counter, next
-attempt and processing correlation columns. Constraints bind status, timestamps,
+The transaction stores the external/resolved reference, attempt counter, next
+attempt and processing correlation. Constraints bind status, timestamps,
 failure codes, counters and reference shape. A self foreign key and a trigger verify
-that a resolved reference is a processed BET with the required matching identity.
+that a resolved WIN reference is a processed BET with the required matching identity.
 Pending identity and correlation cannot change or be deleted; rescheduling must
 increment the counter once, move the retry date forward and preserve acceptance
-balance. Terminal records remain immutable. A partial due index supports worker
-claims. The downgrade locks the table and refuses any reference history; otherwise
-it restores migration 004's behavior while preserving unreferenced financial and
-inbox records. Earlier migrations remain unchanged. Use a forward migration once
-reference history has been accepted.
+balance. Terminal records remain immutable. A partial due index supports worker claims.
 
 ## Full BET refunds
 
@@ -416,15 +414,11 @@ so the BET can arrive later in the same FIFO wallet group. Refund eligibility is
 checked again during resolution under the wallet lock. Infrastructure failures
 roll back all decision records and do not consume a missing-reference attempt.
 
-`Migration202610100006` extends the existing kind, amount, status, result, metadata,
-reference and provider/external-identity constraints. A processed refund requires
+Database constraints cover refund kind, amount, status, result, metadata,
+reference and provider/external identity. A processed refund requires
 its resolved reference; the reference trigger also checks exact numeric equality
-with the BET, and the ledger trigger requires CREDIT. Existing immutable ledger,
-terminal-state and pending-transition protections remain in force. The downgrade
-takes an exclusive table lock and refuses any REFUND history, including pending or
-rejected requests. Without REFUND history it restores migration 005's schema while
-preserving referenced WIN, financial records and inbox history. Earlier migrations
-are unchanged; accepted refund history requires a forward migration.
+with the BET, and the ledger trigger requires CREDIT. Immutable ledger,
+terminal-state and pending-transition protections apply to refunds.
 
 ## Full transaction rollbacks
 
@@ -476,16 +470,13 @@ SQS acknowledges after the pending transaction, inbox, schedule and event commit
 the SQL reference worker later applies or rejects the operation. Infrastructure
 failures roll back the whole decision and do not consume missing-reference attempts.
 
-`Migration202610100007` extends kind, amount, status, rejection, metadata, reference
-and provider/external-identity constraints. Its reference trigger validates processed
+Database constraints cover rollback kind, amount, status, rejection, metadata, reference
+and provider/external identity. The reference trigger validates processed
 BET/WIN/REFUND identity and exact numeric amount. The ledger direction trigger joins
 the reference and requires CREDIT for BET reversal or DEBIT for WIN/REFUND reversal.
-The new `wager_transactions_rollback_reference_unique` index leaves the REFUND index
-intact. Existing non-negative balances, immutable records, pending transitions and
-status-aware ledger foreign keys remain in force. The downgrade locks transactions
-and refuses any ROLLBACK history, including pending and rejected decisions. Otherwise
-it restores migration 006 while preserving REFUND, referenced WIN and inbox/outbox
-history. Earlier migrations remain unchanged.
+Separate `wager_transactions_rollback_reference_unique` and REFUND indexes enforce
+per-kind reversal eligibility. Non-negative balances, immutable records, pending
+transitions and status-aware ledger foreign keys apply to rollbacks.
 
 ## SQS input, inbox and acknowledgment
 
@@ -509,7 +500,7 @@ REFUND/ROLLBACK with a required reference are supported. OPENING remains invalid
 
 The consumer name is `wager-transactions`. Its inbox key is
 `(consumer_name, message_id)`, using the envelope identity rather than SQS's broker ID.
-The business `payloadHash` is unchanged from HTTP. The separate inbox hash is
+The business `payloadHash` is identical to HTTP's. The separate inbox hash is
 SHA-256 over UTF-8 `JSON.stringify({ idempotencyKey, payloadHash })`, with that fixed
 property order. Binding the key too prevents reuse of a message ID with a different
 key from bypassing idempotency validation. Occurrence time and broker delivery
@@ -533,14 +524,10 @@ same FIFO wallet group, potentially including the required reference. Replaying 
 completed envelope reads the referenced transaction's latest persisted decision;
 after resolution it returns the final result without another financial effect.
 
-`Migration202610100003` adds the inbox without rewriting migrations 001 or 002.
 Database constraints enforce the composite identity, hash format, ID lengths,
 transaction foreign key, and paired completion timestamp/transaction ID. Triggers
 protect identity and received time, reject updates/deletes of completed messages,
-and reject truncation. Its down migration locks the table and refuses any inbox
-history: deleting that history would remove durable duplicate protection. Empty-table
-down/up is reversible and preserves financial records; after use, changes require a
-forward migration.
+and reject truncation. Completed inbox records provide durable duplicate protection.
 
 | Outcome | Settlement and recovery |
 | --- | --- |
@@ -624,11 +611,10 @@ that exact message after repairing the dependency; persistent idempotency protec
 already committed effects. Invalid envelopes, missing wallets and conflicting
 identities remain transport/precondition errors, not FAILED wagers.
 
-`Migration202610100008` permits FAILED for external wager kinds, requires the failure
-code and absent processed timestamp/reference/schedule, and extends terminal
-immutability and pending transitions. The status-aware ledger foreign key excludes
-FAILED records. Downgrade restores migration 007 only when no FAILED history exists;
-it never discards accepted audit records or changes earlier migrations.
+Database constraints permit FAILED for external wager kinds and require its failure
+code and absent processed timestamp/reference/schedule. Terminal immutability and
+pending-transition guards protect these decisions. The status-aware ledger foreign
+key excludes FAILED records.
 
 ## Reconciliation
 
@@ -662,14 +648,14 @@ Each publisher forks an EntityManager, begins a separate READ COMMITTED transact
 selects one due unpublished row with `FOR UPDATE SKIP LOCKED`, sends it to SQS, then
 marks it published and commits. Financial transactions must already have committed
 for their outbox rows to be visible. Other publishers skip a held row and continue.
-No lease columns or new migration are needed: process/connection loss releases the
-row lock, and a missing publication commit leaves the row pending.
+Process/connection loss releases the row lock, and a missing publication commit
+leaves the row pending. No separate lease mechanism is required.
 
 This design holds one outbox row lock and one database connection during network I/O.
 It is deliberately small and limits each worker to one in-flight event. It does not
 hold a wallet lock; wallets continue to accept wagers while publishing is slow.
-The trade-off is lower throughput than batched claims with leases, which are not
-needed for this increment. SDK requests have a 1-second connection timeout and a
+The trade-off is lower throughput than batched claims with leases. SDK requests
+have a 1-second connection timeout and a
 3-second request timeout, with one SDK attempt. Queue discovery is lazy and cached
 after success; the send additionally has a 5-second abort deadline.
 
@@ -689,7 +675,7 @@ The output queue is standard SQS `wager-events`, with 14-day retention. The READ
 does not prescribe an output queue name/type; standard delivery makes the duplicate
 contract explicit. Events have no promised per-wallet delivery order. Downstream
 consumers must deduplicate by `eventId` persistently and atomically with their own
-effects. There is no downstream business consumer in this increment, so that end-to-end
+effects. There is no downstream business consumer in this application, so that end-to-end
 consumer guarantee is not claimed. The input FIFO and its DLQ are separate from this
 output queue.
 
@@ -702,7 +688,7 @@ metrics after that commit, as described in the telemetry section.
 
 MiniStack 1.5.24 uses the upstream Docker image pinned by digest, with only SQS enabled.
 The SDK has explicit local test credentials and accepts only loopback HTTP endpoints;
-it does not load the candidate's AWS profile. No AWS account, AWS CLI, Redis or Docker
+it does not load a local AWS profile. No AWS account, AWS CLI, Redis or Docker
 socket mount is needed. Development uses port 4566 and a named state volume; tests use
 4567, a separate container and unique disposable queues. `sqs:setup` is idempotent.
 MiniStack's persistence is a graceful-shutdown snapshot; this emulator setup does not
@@ -753,11 +739,11 @@ Multi-entry pagination is tested with equal timestamps and an append between pag
 It is a live traversal ordered by timestamp/ID, not a frozen snapshot or commit sequence;
 an entry inserted behind a consumed cursor requires a fresh traversal to discover.
 
-Authentication was omitted in the mandatory increments, as permitted by README
-section 2. The original guard extension point now validates external Keycloak access
-tokens by default. There is no local user/password table. Health, metrics and static
-presentation assets remain public on the local application binding. SQS is treated as
-an internal channel, but every message still passes shared provider/domain validation.
+README section 2 permits omitting authentication and requires an extension point.
+This implementation enables external Keycloak access tokens by default through
+`ChallengeAuthGuard` and `AccessTokenVerifier`. There is no local user/password table.
+Health, metrics and static presentation assets are public on the local application
+binding. SQS is an internal channel; every message passes shared provider/domain validation.
 
 ## External identity and presentation UI
 
@@ -775,18 +761,17 @@ create/read/reconcile wallets and read transactions. A provider can submit/read 
 its signed `provider_id`; that check also applies when a transaction is addressed by
 its internal ID. Foreign transaction reads return 404. Operators cannot impersonate
 a provider unless they also hold that provider role and identity. The local presenter
-holds both roles for demonstration. This is an operator/provider API; a future public
-player application would need its own ownership policy before exposing wallet reads.
+holds both roles for demonstration. This is an operator/provider API; it does not
+provide an ownership policy for a public player application.
 
 Authentication is enabled by default. Explicit `AUTH_ENABLED=false` is accepted only
 with `NODE_ENV=test` for isolated financial fixtures; it is not a normal startup mode.
 `bun run test:auth` separately exercises real Keycloak tokens against the API and the
 same isolated PostgreSQL/SQS services, including the browser's Authorization Code +
-PKCE flow and token refresh. The public client keeps the `basic` scope: service-account
-tokens already had a subject, but human-user tokens without that scope did not.
-The verifier continues to require `sub`; the identity fixture supplies it correctly.
-Keycloak's imported realm, client secrets and
-presenter password are disposable local fixtures. Production would require TLS,
+PKCE flow and token refresh. The public client's `basic` scope supplies the `sub`
+claim required by the verifier for human-user access tokens.
+Keycloak's imported realm, client secrets and presenter password are disposable local
+fixtures. Production would require TLS,
 managed secrets, restricted origins and identity-provider operations.
 
 `/demo` serves a small Bun-bundled browser application within the existing Nest app.
@@ -797,72 +782,36 @@ commands, status, JSON response and correlation ID; it does not run shell comman
 Money input remains an exact decimal string. Replay retains the request identity;
 changing an amount under the same key demonstrates a conflict. A current wallet read
 refreshes the balance summary because idempotent responses contain historical balances.
-The browser's history is temporary; PostgreSQL records remain durable. Automated
-assertions remain CLI tests; the separate supervisor below exposes real primitives
-for manually assembling complex scenarios.
+The browser's history is temporary; PostgreSQL records remain durable. The frontend
+is served by the same process as the API, started with `bun run start` on port 3000.
+Automated concurrency and recovery assertions remain CLI tests.
 
-### Isolated demonstration controls
+### Browser operations and terminal tests
 
-The candidate requested reset/seed and individual controls for complex scenarios,
-rather than a button for every test sequence. `bun run demo` starts a local supervisor
-in `scripts/demo`, outside the Nest financial application. It serves the same assets,
-verifies control bearer tokens with the existing Keycloak verifier, and forwards financial
-HTTP once to one of three independent Nest processes. Each process retains the same
-domain/application/adapters and database locking. The supervisor does not retry ambiguous
-HTTP outcomes or serialize financial requests. A generic browser parallel sender supports
-same/distinct financial identities without adding another financial endpoint.
+The frontend creates a wallet, shows its ID, submits BET/WIN/LOSS and
+REFUND/ROLLBACK requests, replays an operation or changes its amount to show a
+conflict, and reads current balances, ledger, journal and reconciliation. Equivalent
+PowerShell commands and actual responses remain visible. It does not start/stop
+instances, send parallel batches, control SQS, simulate outages or reset history.
 
-The supervisor owns loopback port 3100 before touching resources, including in its tests;
-shutdown keeps that port until all managed children and connections close. This prevents
-two cooperating supervisors from rebuilding the same demo concurrently. Its PostgreSQL
-database `wagering_demo` on 55434 and MiniStack on 4568 are fixed local targets. Development
-and test targets are not configurable through control requests. Compose commands pin the
-file/project/service names. Child environment construction excludes inherited financial
-resource overrides. Ordinary `bun run start` has no destructive or process control routes.
+Wallet funding uses the README's `initialBalance` at creation. No DEPOSIT contract
+or payment integration exists in the challenge. A fresh player/wallet provides a
+new funded test example without changing accepted
+history. WIN represents an explicit payout, never a disguised deposit. BET and its
+WIN/LOSS outcome are separate requests. The frontend does not run a game or randomly
+choose an outcome, and the API does not impose a single result per round.
 
-Control routes require operator authorization. Valid SQS sends also require the matching
-provider claim and reuse the shared envelope/wager validators. Writes require JSON, the
-exact local Origin, bounded bodies and allowlisted actions. Fixed malformed-message
-injection is an explicit DLQ example. The HTTP proxy accepts only existing financial,
-health and metrics paths. No browser input becomes shell commands, SQL, file paths or
-network destinations. Lifecycle/control mutations are serialized; overlapping ones return
-409. This lock manages demonstration machinery, not wallets or financial processing.
+SQS examples and the integration/load runners exercise delivery, concurrency and
+recovery from the terminal. The runners start real independent instances. Native
+Windows process stopping does not prove Unix SIGTERM draining; the Linux integration
+suite covers it.
 
-Each child also watches its parent through [Bun IPC](https://bun.sh/docs/runtime/child-process#inter-process-communication-ipc)
-and exits if that connection disappears, preventing a killed supervisor from leaving
-background writers orphaned. Process exit is tracked from the `exited` promise; on the
-tested Windows runtime a signaled child can retain a null `exitCode` after termination.
-
-Reset stops and awaits every managed process before rebuilding the dedicated schema and
-recreating its broker. A fresh broker clears in-flight messages and FIFO deduplication
-state. Reset reapplies the existing nine migrations, then a separate idempotent seed calls
-`OpenWallet` with a fixed demonstration player ID and `100.00`. Its wallet ID is new after
-reset, and the opening follows the normal ledger/accounting/outbox transaction. Startup
-preserves an existing seed's current balance. Keycloak identities and other environments
-are unaffected. Reset is intentionally outside normal financial APIs/immutable-history
-rules and is never a production operation. Failure leaves forwarding unavailable until
-reset succeeds. No new migration is needed for these controls.
-
-Process controls toggle the existing consumer/publisher/reference-worker settings on
-restart. A demo-only child bootstrap can hold `acknowledge` after commit to expose the
-crash/redelivery boundary; it does not modify the production queue adapter. TCP gates can
-interrupt application PostgreSQL/SQS connections while admin audit/queue connections stay
-available for observation. Containers/data remain intact. Native Windows process stopping
-does not prove Unix SIGTERM draining; the Linux suite retains that responsibility.
-
-Audit reads wallet/ledger/accounting totals and bounded inbox/outbox details in one
-repeatable-read snapshot with exact SQL decimals. Queue inspection is a bounded receive
-with visibility zero, which increments receive counts and is not a true read-only peek.
-DLQ redrive searches the currently available ten-message batch, sends before deleting,
-preserves business identity and accepts possible duplicates. Counts are approximate;
-unavailable counts are null rather than zero. Logs are bounded. Demo tracing is disabled;
-the existing Grafana target remains the ordinary development API on port 3000.
-
-Manual controls cover HTTP concurrency, SQS duplication, pending references, publication,
-DLQ and recovery scenarios. They do not expose arbitrary SQL corruption or test triggers.
-Migration/constraint tests, rollback injection, unit edge cases and Linux signal assertions
-remain automated evidence. This optional harness is presentation tooling, not a new
-production orchestration service.
+For manual multi-instance work, use separate listening ports (3000, 3002 and 3003;
+3001 is optional Grafana), sharing PostgreSQL/SQS. Browser login is registered for
+3000; additional instances are addressed with authenticated terminal API calls.
+Three processes cannot bind the same local address/port without an additional
+routing layer, which this presentation does not need. The frontend uses its own
+origin's API and never decides which backend process should run an operation.
 
 ## Optional tracing, dashboard and load experiment
 
@@ -870,7 +819,7 @@ Manual OpenTelemetry spans cover HTTP, the shared financial workflow, SQS settle
 and outbox publication. Explicit spans avoid assuming Node auto-instrumentation works
 unchanged under Bun. `OTEL_ENABLED=false` is the default. W3C trace context is metadata
 outside the canonical financial hash and event data. Optional `traceparent`/`tracestate`
-fields are committed in the existing outbox JSON, allowing a different publisher
+fields are committed in the outbox JSON, allowing a different publisher
 process to continue the trace. Events without these fields still publish normally.
 No schema migration is necessary for these optional JSON envelope fields.
 
@@ -878,14 +827,14 @@ Instrumentation is best effort: observer/export failures must not replace a succ
 financial result or call its workflow twice. Export buffers and deadlines are bounded;
 a crash can lose buffered spans, but not committed financial records. Span/log fields
 exclude tokens, money, complete payloads, SQL and exception stacks. Pending-reference
-workers retain correlation IDs but do not rejoin the original distributed trace in
-this increment. [Observability setup](observability/README.md) documents the limitation.
+workers retain correlation IDs but do not rejoin the original distributed trace.
+[Observability setup](observability/README.md) documents the limitation.
 
 The optional Compose overlay provisions Prometheus, Tempo and a ten-panel Grafana
 dashboard. Published ports remain bound to localhost. Counters aggregate across
 scraped processes; shared outbox gauges use `max`, not a sum of the same database
-backlog. The default scrape target is the development API on port 3000. Docker Desktop
-connectivity was verified without changing the application's localhost bind.
+backlog. The default scrape target is the development API on port 3000 through Docker
+Desktop's `host.docker.internal` address; the application binds to localhost.
 
 `bun run test:load` runs three independent application processes against isolated real
 PostgreSQL and SQS. It measures a hot wallet and twenty distributed wallets, then checks
@@ -893,7 +842,7 @@ committed identities, exact balances, ledger counts and published events. It use
 client retries. Authentication and tracing are explicitly disabled in these isolated
 processes, so the results are a financial baseline rather than authenticated end-to-end
 capacity. Ambiguous transport outcomes prevent positive invariant certification because
-server work may still be in flight. [LOAD_TESTING.md](LOAD_TESTING.md) records methodology,
+server work may still be in flight. [SETUP.md — Load testing](SETUP.md#load-testing) records methodology,
 environment, throughput, percentiles, errors, contention, outbox lag and limitations.
 
 ## Operational telemetry and health
@@ -949,7 +898,7 @@ Readiness is 503 when either dependency fails, while liveness remains 200. Metri
 database reads have the same bounded response behavior. These endpoints require
 no authentication, as allowed for this local challenge.
 
-## Verified behavior and remaining acceptance work
+## Test coverage and platform limits
 
 Real PostgreSQL tests run three independent Bun application processes. They verify
 50 concurrent duplicate openings produce one wallet/credit and 49 conflicts, distinct
@@ -962,65 +911,40 @@ completing while another wallet's row is deliberately locked. They verify persis
 original processed/rejected results, conflicting identities, precise cent debits,
 atomic rollback of both processed and rejected decisions on outbox failure, and an
 unconsumed HTTP response followed by SIGKILL and successful historical replay after
-restart. The latter does not simulate an SQS worker dying before acknowledgment.
+restart.
 
 Real PostgreSQL/MiniStack tests verify that uncommitted opening events are invisible
 to publication, concurrent publishers preserve event envelopes, refused connections
 persist retry state, and killing a publisher after a real send but before its SQL
 commit redelivers the same eventId. Wallet balances still match their ledger sums.
 
-Increment 5's real PostgreSQL/MiniStack input suite verified delivery duplication,
-the shared HTTP/SQS workflow, three-process consumption, atomic inbox rollback, retries,
-DLQ and recovery after SIGKILL between commit and acknowledgment. The full integration
-run passed 53 tests and skipped the native Windows SIGTERM case; exact measurements
-and the remaining validation commands are recorded in SETUP.md.
+The SQS input suite covers duplicate delivery, the shared HTTP/SQS workflow,
+three-process consumption, atomic inbox rollback, bounded retries, DLQ transfer and
+recovery after SIGKILL between financial commit and acknowledgment.
 
-Increment 6 adds 13 integration scenarios: 50 concurrent WIN copies over three
-processes produce one credit; concurrent LOSS copies preserve wallet state; distinct
-credits do not lose updates; near-limit credits remain exact and overflow rejection
-replays its original result. The suite checks shared HTTP/SQS idempotency, inbox/outbox
-rollback, WIN restart recovery, cross-kind identity constraints, invalid ledger
-direction, and migration 004 preservation/refusal. Every final wallet is compared
-with its ledger sum. Exact full-suite and focused-run results are recorded in SETUP.md.
+WIN/LOSS tests cover concurrent credits and zero-movement results, exact near-limit
+arithmetic, immutable overflow rejection, shared transport identities and restart
+recovery. Reference tests cover concurrent pending acceptance, bounded missing checks,
+FIFO progress while a reference is absent and resolution by three restarted workers.
 
-Increment 7 adds nine reference integration scenarios, including 50 pending copies
-across three processes, SQS acknowledgment that permits the later BET through the
-same FIFO group, bounded missing checks, atomic failure rollback, and three reference
-workers resolving six wallets after restart. Migration 005 round trips and identity,
-state and resolved-reference guards are exercised against PostgreSQL. Every final
-wallet matches its ledger sum. The full integration run passed 75 tests with one
-native Windows SIGTERM skip; exact measurements are recorded in SETUP.md.
+REFUND/ROLLBACK tests cover duplicate and competing reversal identities, exact
+reference matching, full inverse movements, insufficient funds, overflow and
+independent per-kind eligibility. Reversals delivered before their BET, WIN or REFUND
+references survive process termination and resolve after restart. Failure injection
+checks atomic rollback of inbox, financial records and outbox. Every final wallet is
+compared with its ledger sum; accounting checks also require wallet liability to
+match that balance and total debits to equal total credits per currency.
 
-Increment 8 adds nine REFUND integration scenarios: 50 duplicate requests across
-three processes credit once; 12 distinct refund identities produce one credit and
-11 durable rejections. Pending SQS refunds survive SIGKILL and three restarted
-workers settle each BET once. Reference/amount rules, overflow recovery, expiry,
-atomic inbox/outbox rollback and migration 006 guards are exercised against real
-PostgreSQL and MiniStack. Every final wallet matches its ledger sum. The full suite
-passed 84 tests with one native Windows SIGTERM skip; exact results are in SETUP.md.
+The suite also exercises guarded migration round trips, immutable database records,
+durable FAILED decisions, consistent reconciliation under concurrent writes,
+correlated telemetry, dependency health and network-outage recovery. Recorded run
+results and commands are in [SETUP.md](SETUP.md).
 
-Increment 9 adds ten ROLLBACK integration scenarios: inverse BET/WIN/REFUND movements,
-50 concurrent copies, competing reversal identities, exact reference matching,
-reversal insufficiency and independent per-kind eligibility. Pending SQS rollbacks
-arriving before BET, WIN and REFUND survive termination and resolution after three
-process restarts. The suite also checks ten missing-reference attempts, atomic
-inbox/outbox failure rollback and migration 007 preservation/refusal and SQL guards.
-Every final wallet matches its ledger sum. The full suite passed 94 tests with one
-native Windows SIGTERM skip; exact results are recorded in SETUP.md.
-
-The subsequent reliability/operations increments implement FAILED audit decisions,
-read-only reconciliation, correlated logs, metrics and liveness/readiness. Their
-measured validation and network-outage recovery results are recorded in SETUP.md.
-Native graceful SIGTERM on Windows remains a platform-specific validation gap;
-the required signal behavior has been verified in Linux through Docker, alongside
-the separate graceful Nest context closure and abrupt crash/recovery checks.
-MiniStack snapshot durability and per-process monitoring limits described above
-remain explicit limitations, not guarantees of a production deployment.
-
-On 2026-10-11 a candidate reported a migration 008 integration failure whose original
-exception was absent from the shared log excerpt. The unchanged full suite and ten
-targeted reruns passed. The cause remains unconfirmed; passing reruns are not a fix.
-The investigation is closed; see SETUP.md's historical record for measured results.
+Native graceful SIGTERM is verified in Linux through Docker. The native-signal case
+is skipped on Windows because Bun's child-process kill path forces termination in
+that environment. Graceful Nest context closure and abrupt crash/recovery are separate
+checks. MiniStack snapshot durability and per-process monitoring limitations described
+above are not guarantees of a production deployment.
 
 ### Linux validation runner
 
@@ -1042,7 +966,7 @@ with the same wager body/key, at most three attempts and 50/100 ms backoff. Othe
 errors fail the test. It drains all requests before teardown and requires 60 distinct
 PROCESSED bets, 60 debits, one opening credit, balance `40.00`, version 61 and every
 snapshot consistent. This checks financial correctness and bounded recovery under
-contention, not a throughput guarantee. Application pool sizes and timeouts are unchanged.
+contention, not a throughput guarantee.
 
 ## Primary references
 
