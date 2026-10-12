@@ -1,0 +1,12 @@
+*
+!Dockerfile.test
+!package.json
+!bun.lock
+!tsconfig.json
+!tsconfig.build.json
+!src/
+!src/**
+!tests/
+!tests/**
+!scripts/
+!scripts/**

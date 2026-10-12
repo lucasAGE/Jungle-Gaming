@@ -1,0 +1,58 @@
+{
+  "name": "distributed-wagering-processor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "engines": {
+    "bun": ">=1.4.3 <2"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:unit": "bun test ./src",
+    "test:integration": "bun scripts/test-integration.ts",
+    "test:integration:linux": "docker compose --profile test run --build --rm integration-linux",
+    "test:auth": "bun scripts/test-auth.ts",
+    "test:demo": "bun scripts/test-demo.ts",
+    "demo": "bun run build && bun scripts/demo.ts",
+    "auth:up": "docker compose --profile auth up -d --wait keycloak",
+    "auth:token": "bun scripts/auth-token.ts",
+    "obs:up": "docker compose -f compose.yaml -f compose.observability.yaml --profile observability up -d prometheus tempo grafana",
+    "obs:check": "bun scripts/check-observability.ts",
+    "test:load": "bun scripts/test-load.ts",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:migrate": "bun src/infrastructure/database/migrate.ts up",
+    "db:rollback": "bun src/infrastructure/database/migrate.ts down",
+    "db:status": "bun src/infrastructure/database/migrate.ts status",
+    "sqs:up": "docker compose up -d --wait ministack && bun run sqs:setup",
+    "sqs:setup": "bun scripts/setup-queues.ts",
+    "sqs:send": "bun scripts/send-wager.ts",
+    "typecheck": "bun --bun tsc --noEmit",
+    "build": "bun --bun tsc -p tsconfig.build.json && bun scripts/build-demo.ts",
+    "start": "bun run build && bun dist/main.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.1149.0",
+    "@mikro-orm/core": "6.6.17",
+    "@mikro-orm/migrations": "6.6.17",
+    "@mikro-orm/postgresql": "6.6.17",
+    "@nestjs/common": "12.1.2",
+    "@nestjs/core": "12.1.2",
+    "@nestjs/platform-express": "12.1.2",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.12.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
+    "@opentelemetry/resources": "2.12.0",
+    "@opentelemetry/sdk-trace-base": "2.12.0",
+    "@opentelemetry/sdk-trace-node": "2.12.0",
+    "decimal.js": "10.6.0",
+    "jose": "6.2.12",
+    "keycloak-js": "26.2.4",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}
