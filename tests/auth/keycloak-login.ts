@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 
 export async function presenterTokens(issuer: string): Promise<{ access_token: string; refresh_token: string; id_token: string }> {
-  const redirectUri = "http://127.0.0.1:3100/demo";
+  const redirectUri = "http://127.0.0.1:3000/demo";
   const verifier = randomBytes(32).toString("base64url");
   const state = crypto.randomUUID();
   const authorization = new URL(`${issuer}/protocol/openid-connect/auth`);

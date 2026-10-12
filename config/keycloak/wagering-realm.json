@@ -177,17 +177,14 @@
       "fullScopeAllowed": false,
       "redirectUris": [
         "http://127.0.0.1:3000/demo",
-        "http://127.0.0.1:3000/demo/*",
-        "http://127.0.0.1:3100/demo",
-        "http://127.0.0.1:3100/demo/*"
+        "http://127.0.0.1:3000/demo/*"
       ],
       "webOrigins": [
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3100"
+        "http://127.0.0.1:3000"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://127.0.0.1:3000/demo##http://127.0.0.1:3100/demo"
+        "post.logout.redirect.uris": "http://127.0.0.1:3000/demo"
       },
       "defaultClientScopes": ["basic"],
       "protocolMappers": [
